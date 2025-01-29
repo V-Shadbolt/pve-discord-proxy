@@ -29,6 +29,34 @@ async function exportLog(webhookRequest) {
     return filename;
 }
 
+async function cleanupOldLogs() {
+    const retentionDays = parseInt(process.env.LOG_RETENTION_DAYS || '3');
+    const logsDir = 'logs';
+    
+    try {
+        // Get all files in the logs directory
+        const files = await fs.readdir(logsDir);
+        const now = new Date();
+        
+        for (const file of files) {
+            const filePath = path.join(logsDir, file);
+            const stats = await fs.stat(filePath);
+            const fileAge = (now - stats.mtime) / (1000 * 60 * 60 * 24); // Convert to days
+            
+            if (fileAge > retentionDays) {
+                await fs.unlink(filePath);
+                console.log(`Deleted old log file: ${file}`);
+            }
+        }
+    } catch (error) {
+        console.error('Error cleaning up old logs:', error);
+    }
+}
+
+// Run cleanup on startup and every 24 hours
+cleanupOldLogs();
+setInterval(cleanupOldLogs, 24 * 60 * 60 * 1000);
+
 function parseBackupContent(content) {
     const lines = content.trim().split('\n');
     let currentVm = null;
@@ -52,7 +80,7 @@ function parseBackupContent(content) {
         }
 
         if (currentSection === 'details' && line.trim() && !line.startsWith('=')) {
-            const [vmid, name, status, time, size, filename] = line.split(/\s+/);
+            const [vmid, name, status, time, size, filename] = line.split(/\s{2,}/);
             if (vmid && name) {
                 currentVm = { vmid, name, status, time, size, filename, logs: [] };
                 vms.push(currentVm);
@@ -81,122 +109,98 @@ function parseBackupContent(content) {
     return { vms, totalInfo };
 }
 
-const DISCORD_LIMITS = {
-    MESSAGE_CONTENT: 2000,
-    EMBED_TITLE: 256,
-    EMBED_DESCRIPTION: 4096,
-    EMBED_FIELDS: 25,
-    EMBED_FIELD_NAME: 256,
-    EMBED_FIELD_VALUE: 1024,
-    EMBED_FOOTER_TEXT: 2048,
-    EMBED_AUTHOR_NAME: 256,
-    TOTAL_EMBEDS: 10,
-    // Discord has a total character limit of 6000 across all embed fields in a message
-    TOTAL_CHARACTERS: 6000
+function generateTextTable(jsonArray) {
+    // Get headers, excluding 'logs' and 'filename'
+    const headers = Object.keys(jsonArray[0])
+        .filter(key => key !== 'logs' && key !== 'filename');
+
+    // Calculate maximum width for each column including header
+    const columnWidths = {};
+    headers.forEach(header => {
+    columnWidths[header] = header.length;
+    jsonArray.forEach(row => {
+        const cellContent = String(row[header] || '');
+        columnWidths[header] = Math.max(columnWidths[header], cellContent.length);
+    });
+    });
+
+    // Generate the header row
+    const headerRow = headers.map(header => 
+    header.padEnd(columnWidths[header])
+    ).join(' | ');
+
+    // Generate the separator line
+    const separator = headers.map(header =>
+    '-'.repeat(columnWidths[header])
+    ).join('-|-');
+
+    // Generate data rows
+    const dataRows = jsonArray.map(row =>
+    headers.map(header =>
+        String(row[header] || '').padEnd(columnWidths[header])
+    ).join(' | ')
+    );
+
+    // Combine all parts
+    const table = `${headerRow}\n${separator}\n${dataRows.join('\n')}`;
+
+    // Wrap in code block
+    return `\`\`\`\n${table}\n\`\`\``;
 };
 
-function truncateString(str, maxLength) {
-    if (str.length <= maxLength) return str;
-    return str.substring(0, maxLength - 3) + '...';
-}
-
-function calculateEmbedLength(embed) {
-    let length = 0;
-    
-    // Add title length
-    if (embed.title) length += embed.title.length;
-    
-    // Add description length
-    if (embed.description) length += embed.description.length;
-    
-    // Add fields length
-    if (embed.fields) {
-        for (const field of embed.fields) {
-            length += field.name.length + field.value.length;
-        }
-    }
-    
-    // Add footer length
-    if (embed.footer?.text) length += embed.footer.text.length;
-    
-    return length;
-}
-
-function createBackupEmbeds(parsedContent, logFileName, urlLogAccessible) {
+function createEmbeds(webhookRequest, parsedContent, logFileName, urlLogAccessible) {
     const { vms, totalInfo } = parsedContent;
     let embeds = [];
-    let totalLength = 0;
 
-    // Create summary embed
-    const summaryEmbed = {
-        title: truncateString(`Backup Summary (${vms.length} VMs)`, DISCORD_LIMITS.EMBED_TITLE),
-        description: truncateString(
-            `**Total Time:** ${totalInfo.runningTime}\n` +
-            `**Total Size:** ${totalInfo.totalSize}\n\n` +
-            `Full logs available [here](${urlLogAccessible}${logFileName})`,
-            DISCORD_LIMITS.EMBED_DESCRIPTION
-        ),
-        color: '2123412'
-    };
+    if (vms.length > 0) {
+        const allOk = vms.every(vm => vm.status.toLowerCase() === 'ok');
 
-    totalLength += calculateEmbedLength(summaryEmbed);
-    embeds.push(summaryEmbed);
-
-    // Create VM embeds
-    for (const vm of vms) {
-        if (embeds.length >= DISCORD_LIMITS.TOTAL_EMBEDS) {
-            console.log('Reached maximum embed limit, consolidating remaining VMs...');
-            break;
-        }
-
-        const vmEmbed = {
-            title: truncateString(`${vm.name} (VM ${vm.vmid})`, DISCORD_LIMITS.EMBED_TITLE),
+        // Create backup embed
+        const backupEmbed = {
+            title: `Backup Summary (${vms.length} Jobs)`,
             fields: [
                 {
-                    name: '📊 Details',
-                    value: truncateString(
-                        `**Status:** ${vm.status}\n` +
-                        `**Time:** ${vm.time}\n` +
-                        `**Size:** ${vm.size}`,
-                        DISCORD_LIMITS.EMBED_FIELD_VALUE
-                    ),
+                    name: 'Details',
+                    value: generateTextTable(vms),
+                    inline: false
+                },
+                {
+                    name: '',
+                    value: `**Total Time:** ${totalInfo.runningTime}\n**Total Size:** ${totalInfo.totalSize}\n\n`,
+                    inline: false
+                },
+                {
+                    name: '',
+                    value: `Full logs available [here](${urlLogAccessible}${logFileName})`,
                     inline: false
                 }
             ],
-            color: vm.status === 'ok' ? '2123412' : '15548997',
-            footer: {
-                text: truncateString(path.basename(vm.filename), DISCORD_LIMITS.EMBED_FOOTER_TEXT)
-            }
+            color: allOk ? '2123412' : '15548997',
         };
 
-        const embedLength = calculateEmbedLength(vmEmbed);
-        if (totalLength + embedLength <= DISCORD_LIMITS.TOTAL_CHARACTERS) {
-            totalLength += embedLength;
-            embeds.push(vmEmbed);
-        } else {
-            // If we can't fit more detailed embeds, create a consolidated embed for remaining VMs
-            const remainingVms = vms.slice(vms.indexOf(vm));
-            const consolidatedEmbed = createConsolidatedEmbed(remainingVms);
-            if (totalLength + calculateEmbedLength(consolidatedEmbed) <= DISCORD_LIMITS.TOTAL_CHARACTERS) {
-                embeds.push(consolidatedEmbed);
-            }
-            break;
-        }
+        embeds.push(backupEmbed);
+    } else {
+        const genericEmbed = {
+            title: webhookRequest.messageTitle,
+            fields: [
+                {
+                    name: 'Message',
+                    value: webhookRequest.messageContent,
+                    inline: false
+                },
+                {
+                    name: 'Severity',
+                    value: webhookRequest.severity,
+                    inline: false
+                },
+            ],
+            color: '2123412',
+        };
+
+        embeds.push(genericEmbed);
     }
-
+    
     return embeds;
-}
-
-function createConsolidatedEmbed(vms) {
-    const vmSummaries = vms.map(vm => 
-        `**${vm.name} (${vm.vmid})**: ${vm.status} - ${vm.size}`
-    );
-
-    return {
-        title: truncateString(`Additional VMs (${vms.length})`, DISCORD_LIMITS.EMBED_TITLE),
-        description: truncateString(vmSummaries.join('\n'), DISCORD_LIMITS.EMBED_DESCRIPTION),
-        color: '2123412'
-    };
 }
 
 app.post('/webhook', checkWebhookConfig, async (req, res) => {
@@ -209,13 +213,11 @@ app.post('/webhook', checkWebhookConfig, async (req, res) => {
             messageTitle: req.body.messageTitle
         };
 
-        console.log(JSON.stringify(webhookRequest));
-
         const fileName = await exportLog(webhookRequest);
         console.log(`Log file ${fileName} written to disk`);
 
         const parsedContent = parseBackupContent(webhookRequest.messageContent);
-        let embeds = createBackupEmbeds(parsedContent, fileName, webhookRequest.urlLogAccessible);
+        let embeds = createEmbeds(webhookRequest, parsedContent, fileName, webhookRequest.urlLogAccessible);
 
         const discordPayload = {
             content: '',
@@ -231,13 +233,11 @@ app.post('/webhook', checkWebhookConfig, async (req, res) => {
         } catch (error) {
             if (error.response?.status === 400) {
                 // If we get a 400 error, try sending a minimal fallback message
+                const allOk = parsedContent.vms.every(vm => vm.status.toLowerCase() === 'ok');
                 const fallbackEmbed = {
                     title: 'Backup Complete',
-                    description: truncateString(
-                        `Backup completed for ${parsedContent.vms.length} VMs. View full logs [here](${webhookRequest.urlLogAccessable}${fileName})`,
-                        DISCORD_LIMITS.EMBED_DESCRIPTION
-                    ),
-                    color: '2123412'
+                    description: `Backup completed for ${parsedContent.vms.length} VMs. View full logs [here](${webhookRequest.urlLogAccessable}${fileName})`,
+                    color: allOk ? '2123412' : '15548997'
                 };
 
                 const fallbackPayload = {
@@ -262,4 +262,5 @@ app.post('/webhook', checkWebhookConfig, async (req, res) => {
 const PORT = process.env.PORT || 80;
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
+    console.log(`Log retention period set to ${process.env.LOG_RETENTION_DAYS || '3'} days`);
 });
