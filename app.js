@@ -9,16 +9,36 @@ const app = express();
 app.use(express.json());
 app.use(morgan('dev'));
 app.use('/logs', express.static('logs'));
+const PORT = process.env.PORT || 80;
+const DISCORD_LIMIT_EMBED_FIELD_VALUE = 1024;
 
-const checkWebhookConfig = (req, res, next) => {
-    const configuredWebhook = process.env.DISCORD_WEBHOOK_URL;
-    if (!configuredWebhook) {
-        console.error('DISCORD_WEBHOOK_URL environment variable is not set');
-        res.status(500).json({ error: 'Discord webhook URL is not configured' });
-        return;
+// Run cleanup on startup and every 24 hours
+cleanupOldLogs();
+setInterval(cleanupOldLogs, 24 * 60 * 60 * 1000);
+
+function truncateString(str, maxLength) {
+    if (str.length <= maxLength) return str;
+    
+    if (str.startsWith('```') && str.endsWith('```')) {
+        // Handle plaintext table while preserving backticks
+        const lines = str.split('\n');
+        let truncated = lines[0] + '\n'; // Start with opening backticks
+        
+        for (let i = 1; i < lines.length - 1; i++) { // Exclude closing backticks initially
+            if ((truncated + '\n' + lines[i]).length > maxLength - 6) break; // Reserve space for closing backticks and ellipsis
+            truncated += (truncated ? '\n' : '') + lines[i];
+        }
+        
+        return truncated + '\n...\n```'; // Ensure backticks are retained
+    } else {
+        // Handle regular text by truncating at the nearest space
+        if (str.length <= maxLength) return str;
+        let truncated = str.substring(0, maxLength - 3);
+        let lastSpace = truncated.lastIndexOf(' ');
+        if (lastSpace > -1) truncated = truncated.substring(0, lastSpace);
+        return truncated + '...';
     }
-    next();
-};
+}
 
 async function exportLog(webhookRequest) {
     const now = new Date();
@@ -52,10 +72,6 @@ async function cleanupOldLogs() {
         console.error('Error cleaning up old logs:', error);
     }
 }
-
-// Run cleanup on startup and every 24 hours
-cleanupOldLogs();
-setInterval(cleanupOldLogs, 24 * 60 * 60 * 1000);
 
 function parseBackupContent(content) {
     const lines = content.trim().split('\n');
@@ -112,7 +128,7 @@ function parseBackupContent(content) {
 function generateTextTable(jsonArray) {
     // Get headers, excluding 'logs' and 'filename'
     const headers = Object.keys(jsonArray[0])
-        .filter(key => key !== 'logs' && key !== 'filename');
+        .filter(key => key !== 'logs' && key !== 'filename' && key !== 'time' && key !== 'size');
 
     // Calculate maximum width for each column including header
     const columnWidths = {};
@@ -148,44 +164,63 @@ function generateTextTable(jsonArray) {
     return `\`\`\`\n${table}\n\`\`\``;
 };
 
-function createEmbeds(webhookRequest, parsedContent, logFileName, urlLogAccessible) {
+function getColorBySeverity(severity) {
+    switch (severity?.toLowerCase()) {
+      case 'info':
+        return 3066993;     // Discord Green
+      case 'error':
+        return 15158332;    // Discord Red
+      case 'unknown':
+        return 16776960;    // Discord Yellow
+      default:
+        return 10197915;    // Discord Grey
+    }
+  };
+
+function createEmbeds(webhookRequest, parsedContent, logFileName) {
     const { vms, totalInfo } = parsedContent;
+    const date = new Date().toLocaleString();
     let embeds = [];
 
     if (vms.length > 0) {
-        const allOk = vms.every(vm => vm.status.toLowerCase() === 'ok');
-
-        // Create backup embed
         const backupEmbed = {
-            title: `Backup Summary (${vms.length} Jobs)`,
+            title: `PVE Node: ${webhookRequest.node} - ${webhookRequest.messageTitle}`,
             fields: [
                 {
                     name: 'Details',
-                    value: generateTextTable(vms),
+                    value: truncateString(generateTextTable(vms), DISCORD_LIMIT_EMBED_FIELD_VALUE),
                     inline: false
                 },
                 {
                     name: '',
-                    value: `**Total Time:** ${totalInfo.runningTime}\n**Total Size:** ${totalInfo.totalSize}\n\n`,
+                    value: `**Total Time:** ${totalInfo.runningTime}\n**Total Size:** ${totalInfo.totalSize}`,
                     inline: false
                 },
                 {
                     name: '',
-                    value: `Full logs available [here](${urlLogAccessible}${logFileName})`,
+                    value: `Full logs available [here](${webhookRequest.urlLogAccessible}${logFileName})`,
                     inline: false
-                }
+                },
+                {
+                    name: '',
+                    value: '',
+                    inline: false
+                },
             ],
-            color: allOk ? '2123412' : '15548997',
+            color: getColorBySeverity(webhookRequest.severity),
+            footer: {
+                text: `${date}`
+            },
         };
 
         embeds.push(backupEmbed);
     } else {
         const genericEmbed = {
-            title: webhookRequest.messageTitle,
+            title: `PVE Node: ${webhookRequest.node} - ${webhookRequest.messageTitle}`,
             fields: [
                 {
                     name: 'Message',
-                    value: webhookRequest.messageContent,
+                    value: truncateString(webhookRequest.messageContent, DISCORD_LIMIT_EMBED_FIELD_VALUE),
                     inline: false
                 },
                 {
@@ -193,8 +228,21 @@ function createEmbeds(webhookRequest, parsedContent, logFileName, urlLogAccessib
                     value: webhookRequest.severity,
                     inline: false
                 },
+                {
+                    name: '',
+                    value: `Full logs available [here](${webhookRequest.urlLogAccessible}${logFileName})`,
+                    inline: false
+                },
+                {
+                    name: '',
+                    value: '',
+                    inline: false
+                },
             ],
-            color: '2123412',
+            color: getColorBySeverity(webhookRequest.severity),
+            footer: {
+                text: `${date}`
+            },
         };
 
         embeds.push(genericEmbed);
@@ -203,21 +251,58 @@ function createEmbeds(webhookRequest, parsedContent, logFileName, urlLogAccessib
     return embeds;
 }
 
-app.post('/webhook', checkWebhookConfig, async (req, res) => {
+function createFallbackEmbeds(webhookRequest, parsedContent, logFileName) {
+    const { vms, totalInfo } = parsedContent;
+    const date = new Date().toLocaleString();
+    let embeds = [];
+
+    if (vms.length > 0) {
+        const backupEmbed = {
+            title: `PVE Node: ${webhookRequest.node} - ${webhookRequest.messageTitle}`,
+            description: `Backup(s) completed.\nView full logs [here](${webhookRequest.urlLogAccessible}${logFileName})`,
+            color: getColorBySeverity(webhookRequest.severity),
+            footer: {
+                text: `${date}`
+            },
+        };
+
+        embeds.push(backupEmbed);
+    } else {
+        const genericEmbed = {
+            title: `PVE Node: ${webhookRequest.node} - ${webhookRequest.messageTitle}`,
+            description: `View full logs [here](${webhookRequest.urlLogAccessible}${logFileName})`,
+            color: getColorBySeverity(webhookRequest.severity),
+            footer: {
+                text: `${date}`
+            },
+        };
+
+        embeds.push(genericEmbed);
+    }
+    
+    return embeds;
+}
+
+app.post('/webhook', async (req, res) => {
     try {
         const webhookRequest = {
-            discordWebhook: process.env.DISCORD_WEBHOOK_URL,
+            discordWebhook: req.body.discordWebhook || process.env.DISCORD_WEBHOOK_URL,
             messageContent: req.body.messageContent,
             urlLogAccessible: req.body.urlLogAccessible,
             severity: req.body.severity,
-            messageTitle: req.body.messageTitle
+            messageTitle: req.body.messageTitle,
+            node: req.body.node || 'pve'
         };
+
+        if (!webhookRequest.discordWebhook) {
+            throw Error('Discord webhook URL is not configured');
+        }
 
         const fileName = await exportLog(webhookRequest);
         console.log(`Log file ${fileName} written to disk`);
 
         const parsedContent = parseBackupContent(webhookRequest.messageContent);
-        let embeds = createEmbeds(webhookRequest, parsedContent, fileName, webhookRequest.urlLogAccessible);
+        const embeds = createEmbeds(webhookRequest, parsedContent, fileName);
 
         const discordPayload = {
             content: '',
@@ -231,35 +316,33 @@ app.post('/webhook', checkWebhookConfig, async (req, res) => {
             });
             res.status(200).send(response.data);
         } catch (error) {
-            if (error.response?.status === 400) {
-                // If we get a 400 error, try sending a minimal fallback message
-                const allOk = parsedContent.vms.every(vm => vm.status.toLowerCase() === 'ok');
-                const fallbackEmbed = {
-                    title: 'Backup Complete',
-                    description: `Backup completed for ${parsedContent.vms.length} VMs. View full logs [here](${webhookRequest.urlLogAccessable}${fileName})`,
-                    color: allOk ? '2123412' : '15548997'
-                };
-
+            if (error.response?.status === 400 || error.response?.status === 404) {
+                // If 400 error, try sending a minimal fallback message
+                const fallbackEmbeds = createFallbackEmbeds(webhookRequest, parsedContent, fileName);
                 const fallbackPayload = {
                     content: '',
-                    embeds: [fallbackEmbed]
+                    embeds: fallbackEmbeds
                 };
-
-                const fallbackResponse = await axios.post(webhookRequest.discordWebhook, fallbackPayload, {
-                    headers: { 'Content-Type': 'application/json' }
-                });
-                res.status(200).send(fallbackResponse.data);
+                try {
+                    const fallbackResponse = await axios.post(webhookRequest.discordWebhook, fallbackPayload, {
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                    res.status(200).send(fallbackResponse.data);
+                } catch (error) {
+                    console.error('Error processing webhook:', error);
+                    res.status(400).send('Error processing webhook: ' + error.message);
+                }
             } else {
-                throw error;
+                console.error('Error processing webhook:', error);
+                res.status(400).send('Error processing webhook:'  + error.message);
             }
         }
     } catch (error) {
         console.error('Error processing webhook:', error);
-        res.status(400).send(error.message);
+        res.status(400).send('Error processing webhook:'  + error.message);
     }
 });
 
-const PORT = process.env.PORT || 80;
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
     console.log(`Log retention period set to ${process.env.LOG_RETENTION_DAYS || '3'} days`);
