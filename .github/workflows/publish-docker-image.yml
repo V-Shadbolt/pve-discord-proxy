@@ -13,12 +13,9 @@ jobs:
 
     strategy:
       matrix:
-        os: [debian, alpine]
+        os: [alpine]
         arch:
           - platform: linux/amd64
-            node: node
-          - platform: linux/arm64
-            node: arm64v8/node
 
     steps:
       - name: Get Current Repository
@@ -43,4 +40,4 @@ jobs:
           platforms: ${{ matrix.arch.platform }}
           push: true
           tags: |
-            ${{ secrets.DOCKER_USERNAME }}/strapi:latest${{ matrix.os == 'alpine' && '-alpine' || '' }}${{ matrix.arch.platform == 'linux/arm64' && '-arm64' || '' }}
+            ${{ secrets.DOCKER_USERNAME }}/pve-discord-proxy:latest
