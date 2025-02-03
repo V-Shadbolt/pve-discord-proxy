@@ -46,4 +46,4 @@ jobs:
             NODE=${{ matrix.arch.node }}
           push: true
           tags: |
-            ${{ secrets.DOCKER_USERNAME }}/pve-discord-proxy:latest
+            ${{ secrets.DOCKER_USERNAME }}/pve-discord-proxy:latest${{ matrix.arch.platform == 'linux/arm64' && '-arm64' || '' }}
