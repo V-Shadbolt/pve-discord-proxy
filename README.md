@@ -12,6 +12,11 @@
 
 This service processes backup and general notifications from Proxmox Virtual Environment (PVE) nodes and forwards them to Discord through webhooks. It provides detailed backup information in a formatted Discord embed, including VM details, backup status, and total backup statistics.
 
+**Screenshots**  
+| Mobile Generic Notification | Desktop Generic Notification | Mobile Backup Notification | Desktop Backup Notification | 
+:-------------------------:|:-------------------------:|:-------------------------:|:-------------------------:|
+![](screenshots/mobile-test-notification.png) | ![](screenshots/desktop-test-notification.png) | ![](screenshots/mobile-backup-notification.png) | ![](screenshots/desktop-backup-notification.png)
+
 ## Installation Options
 
 ### Docker Installation (Recommended)
