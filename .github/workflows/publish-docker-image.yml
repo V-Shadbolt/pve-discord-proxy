@@ -16,6 +16,9 @@ jobs:
         os: [alpine]
         arch:
           - platform: linux/amd64
+            node: node
+          - platform: linux/arm64
+            node: arm64v8/node
 
     steps:
       - name: Get Current Repository
@@ -38,6 +41,9 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.arch.platform }}
+          build-args: |
+            NODE_VERSION=18${{ matrix.os == 'alpine' && '-alpine' || '' }}
+            NODE=${{ matrix.arch.node }}
           push: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/pve-discord-proxy:latest

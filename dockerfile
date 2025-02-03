@@ -1,4 +1,6 @@
-FROM node:18-alpine
+ARG NODE=node
+ARG NODE_VERSION=18-alpine
+FROM ${NODE}:${NODE_VERSION}
 
 WORKDIR /app
 
