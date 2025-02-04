@@ -34,6 +34,7 @@ docker run -d \
   -p 80:80 \
   -e DISCORD_WEBHOOK_URL=your_webhook_url \
   -e LOG_RETENTION_DAYS=3 \
+  -e TIMEZONE=America/Vancouver \
   vshadbolt/pve-discord-proxy
 ```
 
@@ -43,6 +44,7 @@ docker run -d \
   -p 80:80 \
   -e DISCORD_WEBHOOK_URL=your_webhook_url \
   -e LOG_RETENTION_DAYS=3 \
+  -e TIMEZONE=America/Vancouver \
   -v /path/to/logs:/app/logs \
   vshadbolt/pve-discord-proxy
 ```
@@ -61,6 +63,7 @@ npm install
 PORT=80                       # Port for the webhook service
 DISCORD_WEBHOOK_URL=          # Default Discord webhook URL
 LOG_RETENTION_DAYS=3          # Number of days to retain logs
+TIMEZONE=America/Vancouver    # Timezone of your host
 ```
 
 ## Environment Variables
@@ -72,6 +75,7 @@ The service can be configured using the following environment variables:
 | `PORT` | Port the service listens on | 80 |
 | `DISCORD_WEBHOOK_URL` | Default Discord webhook URL | Required |
 | `LOG_RETENTION_DAYS` | Number of days to keep logs | 3 |
+| `TIMEZONE` | Timezone of the host | UTC |
 
 You can retireve your Discrod webhook URL by following the [Discord Webhook Guide](https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks).
 
@@ -89,6 +93,7 @@ services:
     environment:
       - DISCORD_WEBHOOK_URL=your_webhook_url
       - LOG_RETENTION_DAYS=3
+      - TIMEZONE=America/Vancouver
     volumes:
       - ./logs:/app/logs
     restart: unless-stopped
@@ -136,7 +141,7 @@ The service uses different colors for Discord embeds based on severity:
 ### Log Management
 
 - Logs are stored in the `logs` directory
-- File naming format: `YYYY-MM-DD.HH-MM-SS.log`
+- File naming format: `YYYY-MM-DD.HH-MM-SS.log` aligned with your provided timezone.
 - Logs older than `LOG_RETENTION_DAYS` are automatically deleted
 - Logs are accessible through `/logs` endpoint
 

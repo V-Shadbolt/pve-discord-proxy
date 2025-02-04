@@ -11,10 +11,28 @@ app.use(morgan('dev'));
 app.use('/logs', express.static('logs'));
 const PORT = process.env.PORT || 80;
 const DISCORD_LIMIT_EMBED_FIELD_VALUE = 1024;
+const timeZone = process.env.TIMEZONE || 'UTC'
 
 // Run cleanup on startup and every 24 hours
 cleanupOldLogs();
 setInterval(cleanupOldLogs, 24 * 60 * 60 * 1000);
+
+function getFormattedDate() {
+    try {
+        return new Date().toLocaleString('en-US', { 
+            timeZone: timeZone, 
+            dateStyle: 'short', 
+            timeStyle: 'short' 
+        });
+    } catch (error) {
+        console.warn(`Invalid timezone ${timeZone}, falling back to UTC`);
+        return new Date().toLocaleString('en-US', { 
+            timeZone: 'UTC', 
+            dateStyle: 'short', 
+            timeStyle: 'short' 
+        });
+    }
+}
 
 function truncateString(str, maxLength) {
     if (str.length <= maxLength) return str;
@@ -41,10 +59,15 @@ function truncateString(str, maxLength) {
 }
 
 async function exportLog(webhookRequest) {
-    const now = new Date();
-    const filename = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}.${String(now.getHours()).padStart(2, '0')}-${String(now.getMinutes()).padStart(2, '0')}-${String(now.getSeconds()).padStart(2, '0')}.log`;
-    
-    await fs.mkdir('logs', { recursive: true }); // Ensure logs directory exists
+    const now = new Date().toLocaleString('en-US', {
+        timeZone: timeZone,
+        hour12: false
+    }).replace(/(\d+)\/(\d+)\/(\d+), (\d+):(\d+):(\d+)/, (_, m, d, y, h, min, s) => 
+        `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}.${h.padStart(2, '0')}-${min.padStart(2, '0')}-${s.padStart(2, '0')}`
+    );
+
+    const filename = `${now}.log`;
+    await fs.mkdir('logs', { recursive: true });
     await fs.writeFile(path.join('logs', filename), webhookRequest.messageContent);
     return filename;
 }
@@ -56,12 +79,19 @@ async function cleanupOldLogs() {
     try {
         // Get all files in the logs directory
         const files = await fs.readdir(logsDir);
-        const now = new Date();
+        const now = new Date().toLocaleString('en-US', {
+            timeZone: timeZone,
+            hour12: false
+        });
         
         for (const file of files) {
             const filePath = path.join(logsDir, file);
             const stats = await fs.stat(filePath);
-            const fileAge = (now - stats.mtime) / (1000 * 60 * 60 * 24); // Convert to days
+            const mtime = stats.mtime.toLocaleString('en-US', {
+                timeZone: timeZone,
+                hour12: false
+            });
+            const fileAge = (new Date(now) - new Date(mtime)) / (1000 * 60 * 60 * 24);
             
             if (fileAge > retentionDays) {
                 await fs.unlink(filePath);
@@ -179,7 +209,7 @@ function getColorBySeverity(severity) {
 
 function createEmbeds(webhookRequest, parsedContent, logFileName) {
     const { vms, totalInfo } = parsedContent;
-    const date = new Date().toLocaleString();
+    const now = new Date().toISOString();
     let embeds = [];
 
     if (vms.length > 0) {
@@ -193,11 +223,15 @@ function createEmbeds(webhookRequest, parsedContent, logFileName) {
                 },
                 {
                     name: '',
-                    value: `**Total Time:** ${totalInfo.runningTime}\n**Total Size:** ${totalInfo.totalSize}`,
+                    value: `Total Time: ${totalInfo.runningTime}\nTotal Size: ${totalInfo.totalSize}`,
                     inline: false
                 },
                 {
-                    name: '',
+                    name: `Time (${timeZone})`,
+                    value: getFormattedDate(),
+                },
+                {
+                    name: 'Logs',
                     value: `Full logs available [here](${webhookRequest.urlLogAccessible}${logFileName})`,
                     inline: false
                 },
@@ -208,9 +242,7 @@ function createEmbeds(webhookRequest, parsedContent, logFileName) {
                 },
             ],
             color: getColorBySeverity(webhookRequest.severity),
-            footer: {
-                text: `${date}`
-            },
+            timestamp: now,
         };
 
         embeds.push(backupEmbed);
@@ -229,7 +261,11 @@ function createEmbeds(webhookRequest, parsedContent, logFileName) {
                     inline: false
                 },
                 {
-                    name: '',
+                    name: `Time (${timeZone})`,
+                    value: getFormattedDate(),
+                },
+                {
+                    name: 'Logs',
                     value: `Full logs available [here](${webhookRequest.urlLogAccessible}${logFileName})`,
                     inline: false
                 },
@@ -240,9 +276,7 @@ function createEmbeds(webhookRequest, parsedContent, logFileName) {
                 },
             ],
             color: getColorBySeverity(webhookRequest.severity),
-            footer: {
-                text: `${date}`
-            },
+            timestamp: now,
         };
 
         embeds.push(genericEmbed);
@@ -253,7 +287,7 @@ function createEmbeds(webhookRequest, parsedContent, logFileName) {
 
 function createFallbackEmbeds(webhookRequest, parsedContent, logFileName) {
     const { vms, totalInfo } = parsedContent;
-    const date = new Date().toLocaleString();
+    const now = new Date().toISOString();
     let embeds = [];
 
     if (vms.length > 0) {
@@ -261,9 +295,7 @@ function createFallbackEmbeds(webhookRequest, parsedContent, logFileName) {
             title: `PVE Node: ${webhookRequest.node} - ${webhookRequest.messageTitle}`,
             description: `Backup(s) completed.\nView full logs [here](${webhookRequest.urlLogAccessible}${logFileName})`,
             color: getColorBySeverity(webhookRequest.severity),
-            footer: {
-                text: `${date}`
-            },
+            timestamp: now,
         };
 
         embeds.push(backupEmbed);
@@ -272,9 +304,7 @@ function createFallbackEmbeds(webhookRequest, parsedContent, logFileName) {
             title: `PVE Node: ${webhookRequest.node} - ${webhookRequest.messageTitle}`,
             description: `View full logs [here](${webhookRequest.urlLogAccessible}${logFileName})`,
             color: getColorBySeverity(webhookRequest.severity),
-            footer: {
-                text: `${date}`
-            },
+            timestamp: now,
         };
 
         embeds.push(genericEmbed);
